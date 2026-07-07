@@ -27,6 +27,15 @@ library.
   run time, and a rolling event log) alongside the Selenium-driven browser
   window, so the bot's detection loop is visible while it runs instead of
   being a black box.
+- `--demo` mode replays a small set of synthetic screenshots through the real
+  detection functions, with a live preview of what each frame samples and
+  what it decides, for environments with no live Chrome game to point the
+  bot at (see "Demo mode" below).
+- `check_day`/`check_obstacle` accept an optional `tolerance` parameter
+  (default 0, identical to the original exact-match behavior) for
+  tolerance-based color matching instead of exact RGB equality, with a
+  script proving it helps under simulated capture noise without regressing
+  the clean case (see "Detection robustness" below).
 
 ## Architecture
 
@@ -45,7 +54,10 @@ position.
    white background, so the presence of *any* `(83, 83, 83)` pixel in that
    region means an obstacle has entered it. In night mode the colors invert, so
    it checks for white pixels instead. This is why `check_day` has to run first:
-   the "obstacle color" flips depending on the mode.
+   the "obstacle color" flips depending on the mode. Both `check_day` and
+   `check_obstacle` take an optional `tolerance` argument (default `0`, which
+   reproduces the exact-match behavior above byte for byte); see "Detection
+   robustness" below for what a non-zero value buys and how that was verified.
 3. **Decision loop (`main`).** On every iteration, if `check_obstacle()` returns
    `True`, the loop immediately sends a space keypress to jump, then sleeps
    10ms before checking again. There's no distance or speed estimate here: the
@@ -97,6 +109,81 @@ free). Calling `check_obstacle()` with no arguments still works exactly as
 before and computes the mode itself, which is what the detection-logic tests
 exercise.
 
+## Demo mode
+
+There's no live Chrome window actually playing the Dino game in every
+environment this bot runs in (a fresh clone, this project's own review
+sandbox, CI), so `--demo` gives the detection logic something real to run
+against without one.
+
+`tools/generate_demo_frames.py` draws six synthetic screenshots (imports
+`DAY_GROUND_COLOR`, `NIGHT_GROUND_COLOR`, `GAME_AREA_COORDINATES`, and
+`OBSTACLE_AREA_COORDINATES` straight from `main.py`, rather than copying
+those values, so the frames can't quietly drift out of sync with the real
+constants) and writes them to `demo_frames/`: day and night versions of an
+empty track, an obstacle placed outside the trigger box ("approaching but
+not yet in range"), and an obstacle placed inside it ("jump now").
+
+```bash
+python3 tools/generate_demo_frames.py
+python3 main.py --demo
+```
+
+`run_demo()` (in `main.py`) replays those frames through the exact same
+`check_day`/`check_obstacle` functions live mode uses. It does this by
+temporarily swapping out `ImageGrab.grab` for a stand-in that crops the
+current frame instead of capturing the screen, rather than adding a branch
+inside the detection functions themselves, so what runs is genuinely the
+same code path, not a parallel demo-only implementation. `ImageGrab.grab`
+is restored to the real function afterward.
+
+The dashboard gains an image panel in demo mode (`DemoTkStatusView`, a new
+subclass of `TkStatusView`, which itself is untouched) showing each frame
+with the two sampled regions drawn on top: blue for
+`GAME_AREA_COORDINATES` (what `check_day` reads), green or red for
+`OBSTACLE_AREA_COORDINATES` (what `check_obstacle` reads; red when that
+frame triggered a jump). Console-only environments get the same per-frame
+decisions printed to stdout instead (`DemoConsoleStatusView`).
+
+`--demo-dir` points at a different frame directory and `--demo-delay` sets
+the pause between frames (default 1 second, so a human watching the
+dashboard can follow along).
+
+## Detection robustness
+
+The original obstacle/day-night check needs a pixel to be an *exact* RGB
+match. That's airtight against a hand-drawn synthetic frame, which is a
+flat, exact color by construction, but it's fragile against the kind of
+small color drift a real screen capture can have (anti-aliased sprite
+edges, dithering, lossy compression) that a synthetic frame can never
+demonstrate on its own.
+
+`check_day`/`check_obstacle` gained an optional `tolerance` parameter,
+default `0`. At `0` it's the same exact-match logic as before, unchanged.
+At `tolerance > 0`, a pixel counts as a match if every RGB channel is
+within that distance of the target color, via a small helper
+(`_color_distance`), instead of requiring bit-for-bit equality.
+
+This was only kept because it could be proven, not just argued for.
+`tools/compare_detection_robustness.py` builds a "noisy" copy of every demo
+frame (every pixel shifted `±6` per channel in a deterministic checkerboard
+pattern, so no pixel is ever exactly the original color) and runs both the
+old exact-match logic and the new tolerant logic against the clean and
+noisy sets:
+
+```
+                clean frames   noisy frames
+old (tol=0)     6/6 correct    4/6 correct
+new (tol=8)     6/6 correct    6/6 correct
+```
+
+No regression on the clean set, full recovery on the noisy set (the old
+logic missed an obstacle on one trigger frame and misread night as day on
+another). `tolerance` still defaults to `0` everywhere it's currently
+called, so this doesn't change any observed behavior by itself; it's an
+available, proven option, not a default flip, because it's only been
+tested against synthetic noise, not a real screen capture.
+
 ## Setup
 
 ```bash
@@ -134,6 +221,9 @@ and re-measure `OBSTACLE_AREA_COORDINATES` and `GAME_AREA_COORDINATES` in
 `main.py`: they're pinned to one screen resolution and window layout, and will
 misfire (or never trigger) on a different setup.
 
+To see the detection logic run without a live game, use `python3 main.py
+--demo` instead (see "Demo mode" above).
+
 ## Challenges
 
 - **Coordinates are hardcoded to one screen setup.** `OBSTACLE_AREA_COORDINATES`
@@ -170,6 +260,15 @@ misfire (or never trigger) on a different setup.
   `\\` as a line break inside a node and throws "Something's wrong--perhaps a
   missing \item" at compile time. Took a compile-log read to trace the error
   back to the missing `align` key rather than the diagram's logic.
+- **tcolorbox titles with a comma in them.** A couple of explainer PDF
+  section boxes had titles like `title=Not verified here, still needs a
+  real machine with Chrome`. `pdflatex` failed with "I do not know the key
+  '/tcb/still needs a real machine with Chrome'" because tcolorbox parses
+  its bracketed options as a comma-separated key list, so the comma inside
+  the title text was read as the start of a new (nonexistent) option
+  instead of plain text. Wrapping the title value in its own braces
+  (`title={...}`) fixed it; anything with a literal comma in a tcolorbox
+  option value needs that, not just titles with special characters.
 
 ## What I learned
 
@@ -189,9 +288,11 @@ misfire (or never trigger) on a different setup.
 - Compute the obstacle and game-area regions from the actual browser window's
   reported position and size instead of hardcoding absolute screen pixels, so
   the bot survives different resolutions and window placements.
-- Replace the raw pixel-color heuristic with a small template match or a crop
-  diff against a "clear track" reference image, which would hold up better against
-  anti-aliasing and minor color variance than exact RGB tuple matching.
+- Turn on the tolerance-based color matching (`check_day`/`check_obstacle`'s
+  `tolerance` argument) by default once it's been checked against a real
+  screen capture, not just the synthetic noise used to validate it so far;
+  or go further and replace the heuristic with a small template match or a
+  crop diff against a "clear track" reference image.
 - Add a basic distance/speed estimate (e.g. scanning a wider strip and finding
   the nearest obstacle edge) so jump timing can adapt to obstacle type instead
   of relying on a single fixed trigger zone.
@@ -224,6 +325,22 @@ game):
   `ConsoleStatusView` instead of raising, which then prints throttled status
   lines to stdout.
 - `requirements.txt` installs cleanly into a fresh virtual environment.
+- `tools/generate_demo_frames.py` was run for real and produced all 6
+  expected PNG frames in `demo_frames/`.
+- `python3 main.py --demo` was run against a live X display: the dashboard
+  (with its image preview panel) constructed without exceptions, and every
+  one of the 6 frames produced the expected decision (correct day/night
+  read, jump triggered only on the two frames with an obstacle drawn inside
+  the trigger box). The same run was repeated with `DISPLAY` unset,
+  confirming the console fallback prints the same correct per-frame
+  decisions headlessly.
+- After a `--demo` run, `ImageGrab.grab` was confirmed restored to the real
+  function (not left monkeypatched) and `build_status_view()` with no
+  arguments was confirmed to still construct a plain `TkStatusView`, not a
+  demo variant, i.e. live mode's dashboard path is unaffected.
+- `tools/compare_detection_robustness.py` was run for real and produced the
+  6/6 (clean) vs. 4/6 (clean, old logic, noisy frames) vs. 6/6 (new logic,
+  noisy frames) numbers quoted in "Detection robustness" above.
 
 Not verified here, and needs a real machine with Chrome and a live game
 window:
@@ -239,3 +356,7 @@ window:
   reaction-time lag once it's running against a real, fast-moving game
   (`view.update()` was only measured against synthetic events, not a live
   ~10ms detection loop).
+- Whether the `tolerance`-based color matching helps against real
+  screen-capture noise; it was only validated against a synthetic,
+  deterministic checkerboard color shift standing in for that noise, not an
+  actual capture.
