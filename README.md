@@ -111,7 +111,7 @@ setup is required in the common case. If you need to pin a specific driver
 binary, copy `.env.example` to `.env` and set `CHROMEDRIVER_PATH`.
 
 On Linux, the `keyboard` module's global hotkey detection (used here for the `q`
-quit key) needs elevated permissions to read the keyboard device directly
+quit key) needs root access to read the keyboard device directly
 (commonly run with `sudo`), because it hooks input at the OS level rather than
 through the browser.
 
@@ -183,7 +183,7 @@ misfire (or never trigger) on a different setup.
   reported position and size instead of hardcoding absolute screen pixels, so
   the bot survives different resolutions and window placements.
 - Replace the raw pixel-color heuristic with a small template match or a crop
-  diff against a "clear track" reference image, which would be more robust to
+  diff against a "clear track" reference image, which would hold up better against
   anti-aliasing and minor color variance than exact RGB tuple matching.
 - Add a basic distance/speed estimate (e.g. scanning a wider strip and finding
   the nearest obstacle edge) so jump timing can adapt to obstacle type instead
