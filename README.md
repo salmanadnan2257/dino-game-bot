@@ -163,6 +163,13 @@ misfire (or never trigger) on a different setup.
   chromedriver path (`C:\Development\chromedriver.exe`). That's fixed here by
   using Selenium Manager as the default and making the driver path an optional
   environment variable instead.
+- **Diagramming the per-loop sequence in LaTeX.** The deep-dive PDF's
+  loop-iteration sequence diagram used `tikz` nodes with manual `\\` line
+  breaks for actor labels (e.g. `check_day /\\check_obstacle`), but the node
+  style didn't declare `align=center`; without it `pdflatex` doesn't treat
+  `\\` as a line break inside a node and throws "Something's wrong--perhaps a
+  missing \item" at compile time. Took a compile-log read to trace the error
+  back to the missing `align` key rather than the diagram's logic.
 
 ## What I learned
 
