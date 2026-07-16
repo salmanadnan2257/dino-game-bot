@@ -1,0 +1,296 @@
+% explainer-source-hash: 960ce50d1a06f5cb60d0eb961093288892eeda38be15723bf3830b5550d3321c
+% explainer-source-commit: 3f6c7a8913b4ee27f99ff1a17bb5442bba11de07
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{\vspace{-1.5cm}\textbf{Dino Game Bot}\\[0.3cm]
+\large A Brief: What It Does, How It Decides, and Where It Is Soft}
+\author{Portfolio explainer: concise overview}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{keyidea}{The project in four sentences}
+Chrome hides an endless-runner game at \code{chrome://dino/}: a dinosaur runs, cacti
+approach, you press space to jump. This project plays it without touching the game's
+code or data, by screenshotting one rectangle of the screen and asking whether any
+pixel in it is the colour an obstacle would be. If one is, it sends a space keypress.
+812 lines of Python, three files, three dependencies.
+\end{keyidea}
+
+\tableofcontents
+\newpage
+
+\section{The shape of the thing}
+
+Everything the bot does hangs off one loop, and the loop is four steps long.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.98\textwidth}{!}{
+\begin{tikzpicture}[node distance=6mm and 13mm]
+  \node[box] (grab1) {\textbf{1. Which mode?}\\screenshot a large box,\\count white vs. grey pixels};
+  \node[box, right=of grab1] (grab2) {\textbf{2. Anything there?}\\screenshot a small box,\\look for the obstacle colour};
+  \node[dec, right=of grab2] (d) {found?};
+  \node[box, right=of d] (jump) {\textbf{3. Jump}\\send SPACE\\to the browser};
+  \node[box, below=11mm of d] (rec) {\textbf{4. Tell the dashboard}\\mode, obstacle, jump count};
+
+  \draw[flow] (grab1) -- node[lbl, above] {mode} (grab2);
+  \draw[flow] (grab2) -- (d);
+  \draw[flow] (d) -- node[lbl, above] {yes} (jump);
+  \draw[flow] (jump) |- (rec);
+  \draw[flow] (d) -- node[lbl, right] {no} (rec);
+  \draw[dflow] (rec.west) -- ++(-42mm,0) |- (grab1.south);
+  \node[lbl, below=1mm of grab1.south east, xshift=6mm] {repeat};
+\end{tikzpicture}
+}
+\caption{The whole bot. Step 1 exists only because step 2's answer depends on it.}
+\end{figure}
+
+\section{Why step 1 exists}
+
+The Dino game inverts its palette periodically: day mode is dark sprites on a white
+background, night mode is white sprites on a dark background. So ``what colour is an
+obstacle?'' has two answers, and the wrong one is not merely inaccurate, it is
+inverted: a bot hunting for dark pixels in night mode would find the background
+everywhere and jump forever.
+
+Hence the sequence. \code{check\_day} takes the majority vote of white against dark
+grey across a large region, which settles the mode; \code{check\_obstacle} then hunts
+for whichever colour the \emph{other} mode uses, inside a much smaller region placed
+just in front of the dinosaur.
+
+\begin{keyidea}{The intelligence is in the rectangle, not the code}
+\code{check\_obstacle} does not measure distance, speed, or shape. It asks whether a
+single pixel of the target colour appears anywhere in its box. ``Obstacle in the
+box'' and ``jump now'' are treated as the same event, which is only true because the
+box was hand-placed at exactly the right spot. That makes the four hardcoded
+coordinates the most load-bearing and most fragile thing in the repository.
+\end{keyidea}
+
+\section{The three good decisions}
+
+Worth knowing, because each is defensible in an interview.
+
+\subsection{Demo mode patches the eye, not the brain}
+
+The bot needs a live Chrome playing a live game on a screen matching its hardcoded
+coordinates. A fresh clone has none of that, so \code{--demo} replays six pre-drawn
+frames instead. The interesting part is \emph{how}.
+
+\begin{lstlisting}[language=Python,caption={The substitution, from \code{run\_demo}}]
+original_grab = ImageGrab.grab
+try:
+    for filename, frame in frames:
+        ImageGrab.grab = lambda bbox=None, _frame=frame: _frame.crop(bbox)
+        is_day = check_day()
+        obstacle = check_obstacle(is_day)
+        ...
+finally:
+    ImageGrab.grab = original_grab
+\end{lstlisting}
+
+Rather than adding an \code{if demo:} branch inside the detection functions, it
+swaps out the screen-capture call those functions make, \code{ImageGrab.grab}, for
+a stand-in that crops a stored image. The detection functions are byte-for-byte
+the ones live mode runs, and contain no code that could tell the difference.
+
+\begin{keyidea}{Why that distinction is the whole point}
+A demo-only branch means demo mode tests a path production never takes, which is how
+tests come to pass while the product is broken. Patching the input leaves the logic
+untouched, so what runs really is what ships. The \code{finally} restore matters too:
+without it the process would keep returning a stale dino frame from any later capture.
+\end{keyidea}
+
+\subsection{The fixture imports the constants it tests against}
+
+\code{tools/generate\_demo\_frames.py} could have hardcoded the colours and
+coordinates when drawing its frames. It imports them from \file{main.py} instead, so
+re-measuring the coordinates for a different screen moves the test frames with them.
+A fixture that duplicates the constants of the code it tests is a fixture that will
+eventually disagree with it silently.
+
+\subsection{A change was only kept because it could be proven}
+
+\code{check\_day} and \code{check\_obstacle} gained an optional \code{tolerance}
+argument: instead of requiring a pixel to be bit-for-bit \code{(255,255,255)}, count
+it if every channel is within \code{tolerance}. This matters because real screen
+captures drift (anti-aliasing, dithering, compression) in ways a hand-drawn flat
+colour never does.
+
+\code{tools/compare\_detection\_robustness.py} tests it properly: both logics against
+both a clean and a deliberately noisy frame set, so ``did it help?'' and ``did it
+break what worked?'' are answered by the same run, with the expected answers derived
+from filenames rather than a hand-maintained table.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+ & \textbf{clean frames} & \textbf{noisy frames} \\
+\midrule
+old (\code{tolerance=0}) & 6/6 correct & 4/6 correct \\
+new (\code{tolerance=8}) & 6/6 correct & 6/6 correct \\
+\bottomrule
+\end{tabular}
+\caption{I ran this. The README's table reproduces exactly, including which two
+frames the old logic fails.}
+\end{table}
+
+And it defaults to \code{0}, the original exact-match behaviour, because it has only
+ever been proven against synthetic noise. Offering a change rather than imposing it,
+on the grounds that the evidence is synthetic, is the right instinct.
+
+\section{Where it is soft}
+
+The findings below come from running the code, not reading it.
+
+\begin{honest}{The noise in the benchmark only applies to one of the two colours}
+\code{dither()} shifts every channel by $\pm 6$ and its docstring promises ``no pixel
+in the output is ever exactly equal to a color present in the input''. It is not
+true. Dark grey 83 moves to 89 or 77, both genuinely off-target. White 255 moves to
+249 or to \code{min(255, 261)}, which is 255 again. Measured: 420,000 pixels of the
+noisy \file{01\_day\_clear.png}, exactly half, come through bit-for-bit white. So the
+noise fully perturbs grey and half-ignores white, and the experiment is not measuring
+what it thinks. Fixing it is one line, and would likely make the tolerance feature
+look better rather than worse, but as written the evidence does not support the
+conclusion it is offered for.
+\end{honest}
+
+\begin{honest}{A tie in \code{check\_day} silently votes ``night''}
+The return is \code{day\_count > night\_count}. A frame containing neither colour
+scores $0 > 0$, which is \code{False}, so the function reports night on zero
+evidence. Verified against a uniform grey frame. This is why two of the old logic's
+four ``correct'' answers on the noisy set are worthless: \file{04} and \file{05} are
+night frames, the old logic saw nothing at all, defaulted to night, and was scored
+correct. Its honest score on that set is closer to 2/6 than 4/6. The benchmark cannot
+distinguish ``right'' from ``no opinion, guessed, got lucky''.
+\end{honest}
+
+\begin{honest}{The recommended default would slow the bot roughly ninefold}
+The README's ``What I'd do differently'' proposes turning tolerance on by default.
+Nothing anywhere measures what that costs. I did, on this machine, excluding the real
+screen grab: one loop iteration's pixel work goes from about \textbf{70 ms} at
+\code{tolerance=0} to about \textbf{608 ms} at \code{tolerance=8}, roughly 14 Hz down
+to 1.6 Hz. The cause is that \code{count()} and \code{in} are C-speed list scans,
+while the tolerant path is a Python generator calling \code{\_color\_distance} once
+per pixel, about 140,000 function calls where there was one C loop. A bot forming an
+opinion 1.6 times a second will hit obstacles while still counting pixels from a
+stale frame. The feature is correct; accuracy was simply the only axis measured, and
+for a real-time loop it is not the deciding one. It is fixable (do the comparison in
+C via Pillow's \code{point()}, or sample a sparse grid instead of 140,400 pixels),
+but ``turn it on by default'' as stated would break the bot.
+\end{honest}
+
+\begin{honest}{The advertised 10 ms polling loop actually runs near 14 Hz}
+The README frames the 10 ms sleep as the reaction-time knob. It is not: it sits next
+to roughly 70 ms of unavoidable pixel scanning, and it only executes on iterations
+that jumped. On a clear track the loop never sleeps at all, pinning one core at 100\%
+while it takes two screenshots and scans 206,000 pixels per pass. The real lever is
+the pixel count. \code{check\_day} scans 140,400 pixels on every iteration to answer
+one binary question that a few hundred would answer, about a palette that flips maybe
+once a minute. Caching the mode would remove roughly 70\% of the loop's cost for no
+loss.
+\end{honest}
+
+\begin{honest}{The demo frames omit the feature most likely to break the bot}
+\code{make\_frame} fills the canvas with one flat colour, and says so: ``the real
+game has sky and a thin ground strip''. That simplification is harmless for
+\code{check\_day}, which counts and compares. It is not harmless for
+\code{check\_obstacle}, which fires if the target colour appears \emph{once} in its
+box. In the real day-mode game the ground line is dark grey, the exact colour
+\code{check\_obstacle} hunts for in day mode, and the box spans the vertical band
+where a ground line would plausibly sit. If it falls inside, the bot jumps
+continuously forever. To be precise: that the frames contain no ground strip is
+\textbf{confirmed} (their histograms hold two colours, no third); that the real
+game's ground line intersects the box is \textbf{inferred} and untestable here, with
+no Chrome and no live game. The point survives either way: the fixture cannot tell
+those two worlds apart, so ``six of six pass'' proves less than it sounds. The
+fixture was drawn by the same person holding the same assumption as the code.
+\end{honest}
+
+\begin{honest}{Smaller items}
+The constants named \code{DAY\_GROUND\_COLOR}/\code{NIGHT\_GROUND\_COLOR} hold
+background colours, not ground colours, and the docstrings inherit the confusion.
+On a headless Linux box that is not running as root, there is no working way to stop
+the loop: the console view has no \code{closed} attribute, and the \code{q} hotkey
+needs root to read the input device. \code{driver.find\_element(value="t")} is
+re-queried on every jump instead of hoisted. And two of the README's eight
+``Challenges'' bullets are about LaTeX errors in the explainer PDFs, which are not
+challenges of this project at all.
+\end{honest}
+
+\section{Verified against not verified}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=4mm and 10mm]
+  \node[box, fill=okgreen!10, draw=okgreen, text width=52mm] (v)
+    {\textbf{Verified here}\\[2pt]
+     \scriptsize
+     demo runs, 6/6 correct decisions\\
+     headless fallback prints the same\\
+     \texttt{ImageGrab.grab} restored after\\
+     benchmark table reproduces exactly\\
+     frame histograms match the geometry\\
+     tie in \texttt{check\_day} votes night\\
+     \texttt{dither()} leaves white intact\\
+     the 70 ms / 608 ms timings};
+  \node[extbox, right=of v, draw=warnred, text width=52mm] (n)
+    {\textbf{Not verified, needs real Chrome}\\[2pt]
+     \scriptsize
+     that the game loads and responds\\
+     that the coordinates match any\\ real window today\\
+     whether the ground line breaks\\ obstacle detection\\
+     whether it clears obstacles at all\\
+     whether tolerance helps against\\ real capture noise};
+  \draw[flow] (v) -- (n);
+\end{tikzpicture}
+\caption{The line this project cannot cross without a machine running the game. The
+README draws the same line honestly; this document adds the measurements.}
+\end{figure}
+
+\section{Glossary}
+
+\begin{description}[leftmargin=0pt, style=nextline]
+\item[RGB] A colour as three numbers 0 to 255: red, green, blue. White is
+  \code{(255,255,255)}; the game's dark grey is \code{(83,83,83)}.
+\item[Bounding box] A screen rectangle as \code{(left, top, right, bottom)} in
+  pixels from the top-left corner. Down is positive.
+\item[Screen scraping] Driving a program by reading its pixels and sending fake
+  input, because it offers no API. Fragile by nature: the only contract is that the
+  picture keeps looking the same.
+\item[Selenium / WebDriver] A library that drives a real browser, through a helper
+  program (\code{chromedriver}). Since 4.6 it fetches that helper itself, which is
+  why no manual driver setup is needed.
+\item[Pillow / \code{ImageGrab}] Python's imaging library; \code{ImageGrab.grab(bbox)}
+  captures a screen rectangle. It is the bot's eye and the one thing demo mode
+  replaces.
+\item[Monkeypatching] Replacing a module's function at runtime from outside it.
+  Demo mode's mechanism.
+\item[tkinter / \code{mainloop()}] Python's built-in windowing toolkit.
+  \code{mainloop()} never returns, so instead the dashboard pumps the event queue
+  once per iteration and returns immediately, keeping the window alive without
+  taking the loop's thread.
+\item[\code{deque(maxlen=n)}] A queue that discards its oldest item automatically
+  when full. Makes ``keep the last 8 events'' a data-structure choice.
+\item[Chebyshev distance] Difference between two colours measured as the largest
+  gap on any single channel. What \code{tolerance} compares against.
+\end{description}
+
+\begin{keyidea}{The summary}
+A small project that does one thing, unusually well-instrumented for its size, with
+three genuinely good instincts: exercise production code from the test path, keep one
+source of truth for the constants, and refuse a change the evidence does not support.
+Its soft spot is that the evidence it does trust measures accuracy on frames whose
+noise is half-broken, never measures speed at all, and cannot see the failure mode
+most likely to be real. All of that is cheap to fix, and much better learned here
+than from an interviewer.
+\end{keyidea}
+
+\end{document}
